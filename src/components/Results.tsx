@@ -1,16 +1,30 @@
-import { Download, ExternalLink, Search, Trophy } from 'lucide-react'
+import { Download, ExternalLink, FileSpreadsheet, Loader2, Search, Trophy } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { ComparisonResult } from '../lib/api'
 import { downloadCsv, formatDateTime } from '../lib/csv'
+import { downloadExcel, isHigherThanLuxuryx } from '../lib/excel'
 import { CATEGORY_LABEL, type MatchStatus, type ResultRow } from '../lib/types'
 import { lkr, signedLkr, StatusBadge, timeOf } from './ui'
 
 const STATUSES: MatchStatus[] = ['Matched', 'Not Found', 'Price Unavailable', 'Website Inaccessible', 'Not Comparable']
 
+/** Competitor price: shown in red when it is higher than LuxuryX's price; trophy when cheapest. */
+function PriceCell({ row }: { row: ResultRow }) {
+  if (row.competitorPrice === null) return <span className="text-slate-400">—</span>
+  const higher = isHigherThanLuxuryx(row)
+  const cls = higher ? 'rounded-md bg-rose-50 px-1.5 py-0.5 font-semibold text-rose-700 ring-1 ring-inset ring-rose-200' : row.isCheapest ? 'font-semibold text-emerald-800' : ''
+  return (
+    <span className={`inline-flex items-center gap-1 whitespace-nowrap tabular-nums ${cls}`} title={higher ? 'Higher than the LuxuryX price' : undefined}>
+      {row.isCheapest && <Trophy className="size-3.5" aria-label="Cheapest" />}
+      {lkr(row.competitorPrice)}
+    </span>
+  )
+}
+
 function DiffCell({ row }: { row: ResultRow }) {
   const d = row.priceDifference
   if (d === null) return <span className="text-slate-400">—</span>
-  const cls = d < 0 ? 'text-rose-700' : d > 0 ? 'text-emerald-700' : 'text-slate-600'
+  const cls = d > 0 ? 'text-rose-700' : d < 0 ? 'text-emerald-700' : 'text-slate-600'
   return (
     <span className={`whitespace-nowrap font-medium tabular-nums ${cls}`} title={d < 0 ? 'Competitor is cheaper than LuxuryX' : d > 0 ? 'Competitor is dearer than LuxuryX' : 'Same price'}>
       {signedLkr(d)}
@@ -36,6 +50,8 @@ export function Results({ result }: { result: ComparisonResult }) {
   const [shop, setShop] = useState('all')
   const [status, setStatus] = useState<'all' | MatchStatus>('all')
   const [cheapestOnly, setCheapestOnly] = useState(false)
+  const [excelBusy, setExcelBusy] = useState(false)
+  const [excelError, setExcelError] = useState('')
 
   const shopNames = useMemo(() => [...new Map(result.rows.map((r) => [r.competitorId, r.competitorName])).entries()], [result])
 
@@ -57,7 +73,19 @@ export function Results({ result }: { result: ComparisonResult }) {
     return { configs: configs.size, withMatch: withMatch.size, undercut: undercut.size }
   }, [result])
 
-  const fileName = `luxuryx-${result.category}-price-comparison-${formatDateTime(result.finishedAt).replace(/[: ]/g, '-')}.csv`
+  const baseName = `luxuryx-${result.category}-price-comparison-${formatDateTime(result.finishedAt).replace(/[: ]/g, '-')}`
+
+  async function saveExcel() {
+    setExcelBusy(true)
+    setExcelError('')
+    try {
+      await downloadExcel(result.rows, baseName + '.xlsx')
+    } catch (e) {
+      setExcelError('Could not create the Excel file: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setExcelBusy(false)
+    }
+  }
   // Group shading: alternate background per LuxuryX configuration.
   const groupIndex = new Map<string, number>()
   for (const r of rows) if (!groupIndex.has(r.configKey)) groupIndex.set(r.configKey, groupIndex.size)
@@ -67,16 +95,27 @@ export function Results({ result }: { result: ComparisonResult }) {
       <div className="flex flex-col gap-4 border-b border-slate-200 p-4 sm:p-5">
         <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => downloadCsv(result.rows, fileName)}
+            onClick={() => downloadCsv(result.rows, baseName + '.csv')}
             className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2"
           >
             <Download className="size-4" /> Download CSV
           </button>
+          <button
+            onClick={saveExcel}
+            disabled={excelBusy}
+            title="Excel file with competitor prices higher than LuxuryX shown in red"
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
+          >
+            {excelBusy ? <Loader2 className="size-4 animate-spin" /> : <FileSpreadsheet className="size-4" />} Download Excel
+          </button>
           <div className="min-w-0">
             <h2 className="text-base font-semibold">{CATEGORY_LABEL[result.category]} results</h2>
-            <p className="text-xs text-slate-500">Checked {timeOf(result.finishedAt)} · CSV includes all {result.rows.length} rows</p>
+            <p className="text-xs text-slate-500">
+              Checked {timeOf(result.finishedAt)} · downloads include all {result.rows.length} rows · Excel shows higher competitor prices in red
+            </p>
           </div>
         </div>
+        {excelError && <p className="text-sm text-rose-700">{excelError}</p>}
 
         <dl className="grid grid-cols-3 gap-2 text-center sm:max-w-xl">
           <div className="rounded-lg bg-slate-50 px-3 py-2">
@@ -89,7 +128,7 @@ export function Results({ result }: { result: ComparisonResult }) {
           </div>
           <div className="rounded-lg bg-slate-50 px-3 py-2">
             <dt className="text-xs text-slate-500">Cheaper elsewhere</dt>
-            <dd className="text-lg font-semibold tabular-nums text-rose-700">{stats.undercut}</dd>
+            <dd className="text-lg font-semibold tabular-nums text-emerald-700">{stats.undercut}</dd>
           </div>
         </dl>
 
@@ -126,7 +165,7 @@ export function Results({ result }: { result: ComparisonResult }) {
           </label>
         </div>
         <p className="text-xs text-slate-500">
-          Showing {rows.length} of {result.rows.length} rows. Price difference = competitor price − LuxuryX price; red means the competitor is cheaper. All prices LKR.
+          Showing {rows.length} of {result.rows.length} rows. Price difference = competitor price − LuxuryX price. Red = competitor price is higher than LuxuryX; green = competitor is cheaper. All prices LKR.
         </p>
       </div>
 
@@ -156,15 +195,8 @@ export function Results({ result }: { result: ComparisonResult }) {
                   <td className="whitespace-nowrap px-3 py-2.5">{r.storage}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 tabular-nums">{lkr(r.luxuryxPrice)}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 font-medium">{r.competitorName}</td>
-                  <td className="whitespace-nowrap px-3 py-2.5 tabular-nums">
-                    {r.isCheapest ? (
-                      <span className="inline-flex items-center gap-1 font-semibold text-emerald-800">
-                        <Trophy className="size-3.5" />
-                        {lkr(r.competitorPrice)}
-                      </span>
-                    ) : (
-                      lkr(r.competitorPrice)
-                    )}
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <PriceCell row={r} />
                   </td>
                   <td className="px-3 py-2.5">{r.cheapestCompetitor}</td>
                   <td className="px-3 py-2.5">
@@ -202,9 +234,7 @@ export function Results({ result }: { result: ComparisonResult }) {
             </div>
             <div className="mt-2 flex items-baseline justify-between gap-3">
               <p className="text-sm">
-                <span className="font-medium">{r.competitorName}</span>{' '}
-                <span className="tabular-nums">{lkr(r.competitorPrice)}</span>
-                {r.isCheapest && <Trophy className="ml-1 inline size-3.5 text-emerald-700" aria-label="Cheapest" />}
+                <span className="font-medium">{r.competitorName}</span> <PriceCell row={r} />
               </p>
               <DiffCell row={r} />
             </div>
